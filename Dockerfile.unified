@@ -1,0 +1,52 @@
+# Unified Dockerfile for both Streamlit and MCP Server
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    curl \
+    supervisor \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements first for better caching
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy all application code
+COPY . .
+
+# Create non-root user
+RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+USER appuser
+
+# Supervisor configuration to run both services
+RUN mkdir -p /app/logs
+COPY --chown=appuser:appuser <<EOF /app/supervisord.conf
+[supervisord]
+nodaemon=true
+user=appuser
+logfile=/app/logs/supervisord.log
+pidfile=/app/supervisord.pid
+
+[program:streamlit]
+command=streamlit run streamlit_app.py --server.port=8080 --server.address=0.0.0.0
+autostart=true
+autorestart=true
+stderr_logfile=/app/logs/streamlit.err.log
+stdout_logfile=/app/logs/streamlit.out.log
+
+[program:mcp-server]
+command=python -m src.mcp_financial_server
+autostart=true
+autorestart=true
+stderr_logfile=/app/logs/mcp.err.log
+stdout_logfile=/app/logs/mcp.out.log
+environment=MCP_MODE=server
+EOF
+
+EXPOSE 8080
+
+# Run supervisor to manage both processes
+CMD ["supervisord", "-c", "/app/supervisord.conf"]

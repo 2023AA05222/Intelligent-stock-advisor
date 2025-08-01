@@ -1,0 +1,21 @@
+# App Engine configuration (alternative to Cloud Run)
+runtime: python311
+entrypoint: streamlit run streamlit_app.py --server.port=$PORT --server.address=0.0.0.0
+
+# Instance configuration
+instance_class: F2
+automatic_scaling:
+  min_instances: 0
+  max_instances: 10
+  target_cpu_utilization: 0.65
+
+# Environment variables
+env_variables:
+  STREAMLIT_SERVER_HEADLESS: "true"
+  STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
+
+# Handlers for static files (if any)
+handlers:
+- url: /.*
+  script: auto
+  secure: always

@@ -1,0 +1,85 @@
+YAHOO FINANCE API FINANCIAL FIELDS SUMMARY
+==========================================
+
+KEY FINDINGS FOR FINANCIAL STATEMENTS TAB:
+
+1. GROSS PROFIT FIELD EXISTS:
+   - Field name: "Gross Profit" (exact match)
+   - Available in: quarterly_financials, financials, quarterly_income_stmt, income_stmt
+
+2. CORE FINANCIAL METRICS AVAILABLE:
+   Income Statement Fields:
+   - Total Revenue / Operating Revenue
+   - Cost Of Revenue
+   - Gross Profit
+   - Operating Expense
+   - Research And Development
+   - Selling General And Administration
+   - Operating Income
+   - EBITDA / Normalized EBITDA
+   - EBIT
+   - Net Income
+   - Basic EPS / Diluted EPS
+
+   Balance Sheet Fields (from quarterly_balance_sheet):
+   - Total Assets
+   - Total Liabilities Net Minority Interest
+   - Stockholders Equity
+   - Current Assets
+   - Current Liabilities
+   - Cash And Cash Equivalents
+   - Total Debt
+   - Working Capital
+
+   Cash Flow Fields (from quarterly_cashflow):
+   - Operating Cash Flow
+   - Free Cash Flow
+   - Capital Expenditure
+   - Net Income From Continuing Operations
+
+3. RECOMMENDED FINANCIAL STATEMENT STRUCTURE:
+   
+   Income Statement:
+   - Total Revenue
+   - Cost Of Revenue
+   - Gross Profit
+   - Research And Development
+   - Selling General And Administration
+   - Operating Income
+   - EBITDA
+   - Net Income
+   - Basic EPS
+   - Diluted EPS
+
+   Balance Sheet:
+   - Total Assets
+   - Current Assets
+   - Cash And Cash Equivalents
+   - Total Liabilities Net Minority Interest
+   - Current Liabilities
+   - Total Debt
+   - Stockholders Equity
+   - Working Capital
+
+   Cash Flow:
+   - Operating Cash Flow
+   - Free Cash Flow
+   - Capital Expenditure
+   - Net Income From Continuing Operations
+
+4. DATA ACCESS METHODS:
+   - ticker.quarterly_financials (most comprehensive)
+   - ticker.financials (annual)
+   - ticker.quarterly_income_stmt
+   - ticker.quarterly_balance_sheet
+   - ticker.quarterly_cashflow
+
+5. FIELD ACCESS PATTERN:
+   All fields can be accessed by their exact string name as shown above.
+   Example: df.loc["Gross Profit"] will return the gross profit row.
+
+6. DATA STRUCTURE:
+   - Each dataframe has financial metrics as rows (index)
+   - Time periods as columns (most recent first)
+   - Values are in absolute numbers (not ratios)
+   - NaN values may exist for some periods/metrics

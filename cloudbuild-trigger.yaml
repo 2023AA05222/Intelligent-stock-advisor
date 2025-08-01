@@ -1,0 +1,35 @@
+# Cloud Build Trigger Configuration
+# This file defines the trigger for automated deployments
+
+name: deploy-financial-analyst
+description: Deploy Financial Analyst app to Cloud Run on push to main branch
+
+# GitHub configuration
+github:
+  owner: sathishm7432  # Update with actual GitHub username
+  name: fl_financial_advisor
+  push:
+    branch: ^main$
+
+# Build configuration
+filename: cloudbuild.yaml
+
+# Include/exclude files
+includedFiles:
+  - "**/*.py"
+  - "requirements.txt"
+  - "Dockerfile"
+  - "cloudbuild.yaml"
+  - ".dockerignore"
+
+ignoredFiles:
+  - "**/*.md"
+  - ".git/**"
+  - "test_*.py"
+  - "deployment-guide.md"
+  - "*.sh"
+
+# Substitutions (optional)
+substitutions:
+  _REGION: us-central1
+  _SERVICE_NAME: financial-analyst
