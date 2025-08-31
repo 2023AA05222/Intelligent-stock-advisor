@@ -12,8 +12,8 @@ REGION="us-central1"
 SERVICE_NAME="financial-analyst"
 
 # API Keys (from .env file)
-GOOGLE_AI_API_KEY="AIzaSyDkxK4UwL9GHdCSBoAs_m6FB1z-3degaCI"
-OPENAI_API_KEY="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"
+GOOGLE_AI_API_KEY=""
+OPENAI_API_KEY=""
 NEO4J_PASSWORD="financialpass"
 
 echo "🚀 Deploying Financial Analyst to GCP..."
