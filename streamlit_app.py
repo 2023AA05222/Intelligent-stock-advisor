@@ -12,6 +12,7 @@ import google.generativeai as genai
 from google.auth.transport.requests import Request
 from google.oauth2.service_account import Credentials
 from dotenv import load_dotenv
+from src.ai_providers import AIModelManager
 
 # RAG System Integration
 RAG_AVAILABLE = False
@@ -96,43 +97,26 @@ def get_currency_symbol(currency_code):
 
 # Initialize Gemini AI
 @st.cache_resource
-def initialize_gemini():
-    """Initialize Gemini AI with API key or service account credentials"""
+def initialize_ai_model(model_name: str = None):
+    """Initialize selected AI model"""
     try:
-        # Try API key first (more straightforward for Gemini)
-        api_key = os.getenv('GOOGLE_AI_API_KEY')
-        if api_key:
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel('gemini-1.5-flash')
-            return model
+        if model_name:
+            provider = AIModelManager.get_provider(model_name)
+            if provider:
+                return provider
         
-        # Fallback to service account credentials
-        service_account_path = "/home/rajan/CREDENTIALS/rtc-lms-ef961e47471d.json"
+        # Get default model if none specified
+        default_model = AIModelManager.get_default_model()
+        if default_model:
+            return AIModelManager.get_provider(default_model)
         
-        if os.path.exists(service_account_path):
-            # Load service account credentials
-            credentials = Credentials.from_service_account_file(
-                service_account_path,
-                scopes=['https://www.googleapis.com/auth/generative-language.retriever']
-            )
-            
-            # Configure Gemini
-            genai.configure(credentials=credentials)
-            
-            # Initialize the model
-            model = genai.GenerativeModel('gemini-1.5-flash')
-            return model
-        else:
-            st.error("❌ Neither GOOGLE_AI_API_KEY environment variable nor service account file found.")
-            st.info("To use AI Chat, set GOOGLE_AI_API_KEY environment variable or ensure service account credentials are available.")
-            return None
+        return None
     except Exception as e:
-        st.error(f"Error initializing Gemini AI: {str(e)}")
-        st.info("💡 Try setting GOOGLE_AI_API_KEY environment variable for easier setup")
+        st.error(f"Error initializing AI model: {str(e)}")
         return None
 
-def create_financial_context(symbol, stock_data, stock_info, news_data, financial_statements):
-    """Create comprehensive context from all available data sources"""
+def create_financial_context(symbol, stock_data, stock_info, news_data, financial_statements, max_context_size=50000):
+    """Create comprehensive context from all available data sources with size limits"""
     context_parts = []
     
     # Complete stock information
@@ -151,64 +135,72 @@ def create_financial_context(symbol, stock_data, stock_info, news_data, financia
         context_parts.append(f"Date range: {stock_data.index[0].strftime('%Y-%m-%d')} to {stock_data.index[-1].strftime('%Y-%m-%d')}")
         context_parts.append("")
         
-        # Include all price data
-        context_parts.append("Full price history:")
-        for idx, row in stock_data.iterrows():
+        # Include price data summary and recent data only
+        context_parts.append("Recent price history (last 20 data points):")
+        recent_data = stock_data.tail(20)
+        for idx, row in recent_data.iterrows():
             context_parts.append(f"{idx.strftime('%Y-%m-%d %H:%M:%S')}: Open={row['Open']:.2f}, High={row['High']:.2f}, Low={row['Low']:.2f}, Close={row['Close']:.2f}, Volume={row['Volume']:,}")
+        
+        # Add summary statistics
+        context_parts.append("\nPrice Statistics:")
+        context_parts.append(f"Current Price: ${stock_data['Close'].iloc[-1]:.2f}")
+        context_parts.append(f"Period High: ${stock_data['High'].max():.2f}")
+        context_parts.append(f"Period Low: ${stock_data['Low'].min():.2f}")
+        context_parts.append(f"Average Volume: {stock_data['Volume'].mean():,.0f}")
+        context_parts.append(f"Price Change: {((stock_data['Close'].iloc[-1] / stock_data['Close'].iloc[0]) - 1) * 100:.2f}%")
         context_parts.append("")
     
     # Complete financial statements
     if financial_statements:
         context_parts.append("=== COMPLETE FINANCIAL STATEMENTS ===")
         
-        # All quarterly financials (Income Statement)
+        # Recent quarterly financials (Income Statement) - last 4 quarters only
         quarterly_financials = financial_statements.get('quarterly_financials')
         if quarterly_financials is not None and not quarterly_financials.empty:
-            context_parts.append("\n--- QUARTERLY INCOME STATEMENTS ---")
-            context_parts.append("All Quarterly Financials:")
-            # Include all quarters
-            for col in quarterly_financials.columns:
+            context_parts.append("\n--- RECENT QUARTERLY INCOME STATEMENTS (Last 4 Quarters) ---")
+            # Include only last 4 quarters
+            recent_quarters = quarterly_financials.columns[:4] if len(quarterly_financials.columns) >= 4 else quarterly_financials.columns
+            for col in recent_quarters:
                 context_parts.append(f"\nPeriod: {col.strftime('%Y-%m-%d')}")
+                # Include only key metrics
+                key_metrics = ['Total Revenue', 'Gross Profit', 'Operating Income', 'Net Income', 'EBITDA', 'Operating Expense']
                 for metric in quarterly_financials.index:
-                    value = quarterly_financials.loc[metric, col]
-                    if pd.notna(value):
-                        context_parts.append(f"{metric}: {value:,.0f}")
+                    if any(key in metric for key in key_metrics):
+                        value = quarterly_financials.loc[metric, col]
+                        if pd.notna(value):
+                            context_parts.append(f"{metric}: {value:,.0f}")
         
-        # All annual financials (Income Statement)
+        # Recent annual financials (Income Statement) - last 2 years only
         annual_financials = financial_statements.get('financials')
         if annual_financials is not None and not annual_financials.empty:
-            context_parts.append("\n--- ANNUAL INCOME STATEMENTS ---")
-            context_parts.append("All Annual Financials:")
-            for col in annual_financials.columns:
+            context_parts.append("\n--- RECENT ANNUAL INCOME STATEMENTS (Last 2 Years) ---")
+            recent_years = annual_financials.columns[:2] if len(annual_financials.columns) >= 2 else annual_financials.columns
+            for col in recent_years:
                 context_parts.append(f"\nYear: {col.strftime('%Y-%m-%d')}")
+                # Include only key metrics
+                key_metrics = ['Total Revenue', 'Gross Profit', 'Operating Income', 'Net Income', 'EBITDA', 'Operating Expense']
                 for metric in annual_financials.index:
-                    value = annual_financials.loc[metric, col]
-                    if pd.notna(value):
-                        context_parts.append(f"{metric}: {value:,.0f}")
+                    if any(key in metric for key in key_metrics):
+                        value = annual_financials.loc[metric, col]
+                        if pd.notna(value):
+                            context_parts.append(f"{metric}: {value:,.0f}")
         
-        # Balance sheet
+        # Recent quarterly balance sheet - last 2 quarters only
         quarterly_balance_sheet = financial_statements.get('quarterly_balance_sheet')
         if quarterly_balance_sheet is not None and not quarterly_balance_sheet.empty:
-            context_parts.append("\n--- QUARTERLY BALANCE SHEETS ---")
-            context_parts.append("All Quarterly Balance Sheets:")
-            for col in quarterly_balance_sheet.columns:
+            context_parts.append("\n--- RECENT QUARTERLY BALANCE SHEETS (Last 2 Quarters) ---")
+            recent_quarters = quarterly_balance_sheet.columns[:2] if len(quarterly_balance_sheet.columns) >= 2 else quarterly_balance_sheet.columns
+            for col in recent_quarters:
                 context_parts.append(f"\nPeriod: {col.strftime('%Y-%m-%d')}")
+                # Include only key items
+                key_items = ['Total Assets', 'Total Liabilities', 'Total Equity', 'Cash', 'Total Debt', 'Current Assets', 'Current Liabilities']
                 for item in quarterly_balance_sheet.index:
-                    value = quarterly_balance_sheet.loc[item, col]
-                    if pd.notna(value):
-                        context_parts.append(f"{item}: {value:,.0f}")
+                    if any(key in item for key in key_items):
+                        value = quarterly_balance_sheet.loc[item, col]
+                        if pd.notna(value):
+                            context_parts.append(f"{item}: {value:,.0f}")
         
-        # Annual balance sheet
-        annual_balance_sheet = financial_statements.get('balance_sheet')
-        if annual_balance_sheet is not None and not annual_balance_sheet.empty:
-            context_parts.append("\n--- ANNUAL BALANCE SHEETS ---")
-            context_parts.append("All Annual Balance Sheets:")
-            for col in annual_balance_sheet.columns:
-                context_parts.append(f"\nYear: {col.strftime('%Y-%m-%d')}")
-                for item in annual_balance_sheet.index:
-                    value = annual_balance_sheet.loc[item, col]
-                    if pd.notna(value):
-                        context_parts.append(f"{item}: {value:,.0f}")
+        # Skip detailed annual balance sheet to save space (quarterly is sufficient)
         
         # Cash flow
         quarterly_cashflow = financial_statements.get('quarterly_cashflow')
@@ -254,7 +246,21 @@ def create_financial_context(symbol, stock_data, stock_info, news_data, financia
                 context_parts.append(f"   Link: {article['link']}")
         context_parts.append("")
     
-    return "\n".join(context_parts)
+    # Join and check size
+    full_context = "\n".join(context_parts)
+    
+    # Truncate if too large
+    if len(full_context) > max_context_size:
+        # Try to keep the most important parts
+        truncated_context = full_context[:max_context_size]
+        # Find a good breaking point
+        last_section = truncated_context.rfind("\n===")
+        if last_section > max_context_size * 0.7:
+            truncated_context = truncated_context[:last_section]
+        truncated_context += "\n\n[Note: Additional context truncated due to size limits]"
+        return truncated_context
+    
+    return full_context
 
 def get_base_prompt():
     """Get the base prompt template for Gemini"""
@@ -339,12 +345,12 @@ IMPORTANT:
 3. Use specific calculations and data points from the provided context
 4. Calculate all technical indicators from the raw OHLCV data provided - do not claim data is missing"""
 
-def get_gemini_response(model, user_question, context):
-    """Get response from Gemini model"""
+def get_ai_response(provider, user_question, context):
+    """Get response from AI provider"""
     try:
         prompt = get_base_prompt().format(context=context, user_question=user_question)
-        response = model.generate_content(prompt)
-        return response.text
+        response_text = provider.generate_response(prompt)
+        return response_text
     except Exception as e:
         return f"Error generating response: {str(e)}"
 
@@ -519,160 +525,177 @@ if st.session_state.stock_data is not None and not st.session_state.stock_data.e
     with tab1:
         st.subheader("🤖 AI Financial Chat")
         
-        # Initialize Gemini model
-        gemini_model = initialize_gemini()
+        # Get available AI models
+        available_models = AIModelManager.get_available_models()
+        active_models = [model for model, is_available in available_models.items() if is_available]
         
-        if gemini_model is None:
-            st.error("❌ AI Chat is not available. Please configure Gemini API access.")
+        if not active_models:
+            st.error("❌ No AI models are configured. Please set up API keys for Google AI or OpenAI.")
             
             with st.expander("🔧 How to set up AI Chat"):
                 st.markdown("""
-                **Option 1: Using .env file (Recommended)**
+                **Option 1: Google Gemini API**
                 1. Get a Google AI API key from [Google AI Studio](https://makersuite.google.com/app/apikey)
                 2. Edit the `.env` file in the project root
-                3. Uncomment and set: `GOOGLE_AI_API_KEY=your-api-key-here`
+                3. Set: `GOOGLE_AI_API_KEY=your-api-key-here`
                 4. Restart the application
                 
-                **Option 2: Using environment variable**
-                1. Set environment variable: `export GOOGLE_AI_API_KEY="your-api-key"`
-                2. Restart the application
+                **Option 2: OpenAI API**
+                1. Get an OpenAI API key from [OpenAI Platform](https://platform.openai.com/api-keys)
+                2. Edit the `.env` file in the project root
+                3. Set: `OPENAI_API_KEY=your-api-key-here`
+                4. Restart the application
                 
-                **Option 3: Using Service Account**
-                1. Ensure service account JSON file is at: `/home/rajan/CREDENTIALS/rtc-lms-ef961e47471d.json`
-                2. Grant necessary permissions to the service account
+                **Option 3: Both APIs**
+                Configure both API keys to have access to all models
                 
                 **Test your setup:**
                 ```bash
-                # Edit .env file or export the variable
+                # Edit .env file with your API keys
                 make run-streamlit
                 ```
                 """)
         else:
-            st.success("✅ AI Chat is ready!")
-            
-            # Initialize chat history in session state
-            if 'chat_history' not in st.session_state:
-                st.session_state.chat_history = []
-            
-            # Chat interface
-            st.markdown("### 💬 Ask questions about your stock data")
-            st.markdown("*Ask about price trends, financial metrics, news analysis, or any insights from the data.*")
-            
-            # Sample questions
-            with st.expander("💡 Sample Questions"):
-                st.markdown("""
-                - What's the trend in gross profit margins over the last few quarters?
-                - How has the stock price performed recently?
-                - What are the key insights from recent news?
-                - Is the company's revenue growing?
-                - What are the main financial strengths and weaknesses?
-                - How does the current valuation look?
-                - What risks should I be aware of?
-                """)
-            
-            # Chat input form (enables Enter key submission)
-            with st.form("chat_form", clear_on_submit=True):
-                user_question = st.text_input(
-                    "Ask your question:",
-                    placeholder="e.g., What's the trend in revenue growth?",
-                    key="chat_input"
+            # Model selection
+            col1, col2 = st.columns([2, 3])
+            with col1:
+                selected_model = st.selectbox(
+                    "Select AI Model:",
+                    options=active_models,
+                    index=0,
+                    help="Choose which AI model to use for analysis"
                 )
-                
-                col1, col2 = st.columns([1, 4])
-                with col1:
-                    send_button = st.form_submit_button("🚀 Send", use_container_width=True)
-                with col2:
-                    pass  # Empty column for spacing
+            with col2:
+                st.success(f"✅ {len(active_models)} model(s) available")
             
-            # Clear Chat button (outside form)
-            if st.button("🗑️ Clear Chat", use_container_width=True):
-                st.session_state.chat_history = []
-                st.rerun()
+            # Initialize selected model
+            ai_provider = initialize_ai_model(selected_model)
             
-            # Process user question
-            if send_button and user_question.strip():
-                with st.spinner("🤔 Analyzing your data..."):
-                    # Gather all available data for context
-                    financial_statements_data = None
-                    news_data = st.session_state.get('news_data', [])
-                    
-                    # Fetch financial statements if needed
-                    try:
-                        stock = yf.Ticker(symbol)
-                        financial_statements_data = {
-                            'quarterly_financials': stock.quarterly_financials,
-                            'yearly_financials': stock.financials,
-                            'quarterly_balance_sheet': stock.quarterly_balance_sheet,
-                            'yearly_balance_sheet': stock.balance_sheet,
-                            'quarterly_cashflow': stock.quarterly_cashflow,
-                            'yearly_cashflow': stock.cashflow
-                        }
-                    except Exception as e:
-                        st.warning(f"Could not fetch complete financial statements: {str(e)}")
-                    
-                    # Create comprehensive context (RAG-enhanced if available)
-                    if RAG_AVAILABLE:
-                        context, is_rag_enhanced = get_rag_enhanced_context(
-                            symbol,
-                            st.session_state.stock_data,
-                            st.session_state.stock_info,
-                            news_data,
-                            financial_statements_data,
-                            user_question
-                        )
-                        
-                        if is_rag_enhanced:
-                            st.info("🔍 Using RAG-enhanced context for better analysis")
-                    else:
-                        context = create_financial_context(
-                            symbol, 
-                            st.session_state.stock_data, 
-                            st.session_state.stock_info, 
-                            news_data,
-                            financial_statements_data
-                        )
-                        is_rag_enhanced = False
-                    
-                    # Get AI response with potentially enhanced prompt
-                    if RAG_AVAILABLE and is_rag_enhanced:
-                        # Use RAG-enhanced prompt
-                        enhanced_prompt = rag_enhanced_prompt_modification(
-                            get_base_prompt(), context, user_question
-                        )
-                        response = gemini_model.generate_content(enhanced_prompt)
-                        ai_response = response.text
-                    else:
-                        # Use original method
-                        ai_response = get_gemini_response(gemini_model, user_question, context)
-                    
-                    # Add to chat history
-                    st.session_state.chat_history.append({
-                        'question': user_question,
-                        'response': ai_response,
-                        'timestamp': datetime.now().strftime('%H:%M:%S')
-                    })
-                    
-                    # Clear input
-                    st.rerun()
-            
-            # Display chat history
-            if st.session_state.chat_history:
-                st.markdown("### 💭 Chat History")
-                
-                for i, chat in enumerate(reversed(st.session_state.chat_history)):
-                    with st.container():
-                        # User question
-                        st.markdown(f"**🙋 You ({chat['timestamp']}):**")
-                        st.markdown(f"*{chat['question']}*")
-                        
-                        # AI response
-                        st.markdown("**🤖 AI Analyst:**")
-                        st.markdown(chat['response'])
-                        
-                        if i < len(st.session_state.chat_history) - 1:
-                            st.markdown("---")
+            if not ai_provider:
+                st.error(f"Failed to initialize {selected_model}")
             else:
-                st.info("💡 Start a conversation by asking a question about your stock data!")
+                # Initialize chat history in session state
+                if 'chat_history' not in st.session_state:
+                    st.session_state.chat_history = []
+                
+                # Chat interface
+                st.markdown("### 💬 Ask questions about your stock data")
+                st.markdown("*Ask about price trends, financial metrics, news analysis, or any insights from the data.*")
+            
+                # Sample questions
+                with st.expander("💡 Sample Questions"):
+                    st.markdown("""
+                    - What's the trend in gross profit margins over the last few quarters?
+                    - How has the stock price performed recently?
+                    - What are the key insights from recent news?
+                    - Is the company's revenue growing?
+                    - What are the main financial strengths and weaknesses?
+                    - How does the current valuation look?
+                    - What risks should I be aware of?
+                    """)
+            
+                # Chat input form (enables Enter key submission)
+                with st.form("chat_form", clear_on_submit=True):
+                    user_question = st.text_input(
+                        "Ask your question:",
+                        placeholder="e.g., What's the trend in revenue growth?",
+                        key="chat_input"
+                    )
+                    
+                    col1, col2 = st.columns([1, 4])
+                    with col1:
+                        send_button = st.form_submit_button("🚀 Send", use_container_width=True)
+                    with col2:
+                        pass  # Empty column for spacing
+            
+                # Clear Chat button (outside form)
+                if st.button("🗑️ Clear Chat", use_container_width=True):
+                    st.session_state.chat_history = []
+                    st.rerun()
+                
+                # Process user question
+                if send_button and user_question.strip():
+                    with st.spinner("🤔 Analyzing your data..."):
+                        # Gather all available data for context
+                        financial_statements_data = None
+                        news_data = st.session_state.get('news_data', [])
+                        
+                        # Fetch financial statements if needed
+                        try:
+                            stock = yf.Ticker(symbol)
+                            financial_statements_data = {
+                                'quarterly_financials': stock.quarterly_financials,
+                                'yearly_financials': stock.financials,
+                                'quarterly_balance_sheet': stock.quarterly_balance_sheet,
+                                'yearly_balance_sheet': stock.balance_sheet,
+                                'quarterly_cashflow': stock.quarterly_cashflow,
+                                'yearly_cashflow': stock.cashflow
+                            }
+                        except Exception as e:
+                            st.warning(f"Could not fetch complete financial statements: {str(e)}")
+                        
+                        # Create comprehensive context (RAG-enhanced if available)
+                        if RAG_AVAILABLE:
+                            context, is_rag_enhanced = get_rag_enhanced_context(
+                                symbol,
+                                st.session_state.stock_data,
+                                st.session_state.stock_info,
+                                news_data,
+                                financial_statements_data,
+                                user_question
+                            )
+                            
+                            if is_rag_enhanced:
+                                st.info("🔍 Using RAG-enhanced context for better analysis")
+                        else:
+                            context = create_financial_context(
+                                symbol, 
+                                st.session_state.stock_data, 
+                                st.session_state.stock_info, 
+                                news_data,
+                                financial_statements_data
+                            )
+                            is_rag_enhanced = False
+                        
+                        # Get AI response with potentially enhanced prompt
+                        if RAG_AVAILABLE and is_rag_enhanced:
+                            # Use RAG-enhanced prompt
+                            enhanced_prompt = rag_enhanced_prompt_modification(
+                                get_base_prompt(), context, user_question
+                            )
+                            ai_response = ai_provider.generate_response(enhanced_prompt)
+                        else:
+                            # Use original method
+                            ai_response = get_ai_response(ai_provider, user_question, context)
+                        
+                        # Add to chat history
+                        st.session_state.chat_history.append({
+                            'question': user_question,
+                            'response': ai_response,
+                            'timestamp': datetime.now().strftime('%H:%M:%S')
+                        })
+                        
+                        # Clear input
+                        st.rerun()
+            
+                # Display chat history
+                if st.session_state.chat_history:
+                    st.markdown("### 💭 Chat History")
+                    
+                    for i, chat in enumerate(reversed(st.session_state.chat_history)):
+                        with st.container():
+                            # User question
+                            st.markdown(f"**🙋 You ({chat['timestamp']}):**")
+                            st.markdown(f"*{chat['question']}*")
+                            
+                            # AI response
+                            st.markdown("**🤖 AI Analyst:**")
+                            st.markdown(chat['response'])
+                            
+                            if i < len(st.session_state.chat_history) - 1:
+                                st.markdown("---")
+                else:
+                    st.info("💡 Start a conversation by asking a question about your stock data!")
     
     with tab2:
         # Create candlestick chart with volume
@@ -973,8 +996,17 @@ if st.session_state.stock_data is not None and not st.session_state.stock_data.e
                         indexed_counts = rag_integration.index_stock_data(
                             symbol, None, {}, news_data, None
                         )
-                        if "error" not in indexed_counts and indexed_counts.get('news', 0) > 0:
-                            st.success(f"📚 Indexed {indexed_counts['news']} news chunks for enhanced AI analysis")
+                        if "error" not in indexed_counts:
+                            # Calculate total news chunks across all models
+                            total_news_chunks = 0
+                            news_results = indexed_counts.get('news', {})
+                            if isinstance(news_results, dict):
+                                for model_key, count in news_results.items():
+                                    if isinstance(count, int) and count > 0:
+                                        total_news_chunks += count
+                            
+                            if total_news_chunks > 0:
+                                st.success(f"📚 Indexed {total_news_chunks} news chunks across all models for enhanced AI analysis")
             
             # Display all news articles
             st.markdown(f"### Showing all {len(news_data)} articles")

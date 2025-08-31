@@ -6,7 +6,7 @@ Autocut, Reranking, and RAFT techniques
 
 import numpy as np
 import pandas as pd
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple, Optional, TYPE_CHECKING
 import json
 import pickle
 from datetime import datetime, timedelta
@@ -21,8 +21,30 @@ try:
     from sentence_transformers import SentenceTransformer
     from transformers import AutoTokenizer, AutoModel
     import torch
+    SENTENCE_TRANSFORMER_AVAILABLE = True
 except ImportError as e:
     logging.warning(f"Some RAG dependencies not installed: {e}")
+    SENTENCE_TRANSFORMER_AVAILABLE = False
+    # Create a dummy class for type hints when the package is not installed
+    class SentenceTransformer:
+        def __init__(self, *args, **kwargs):
+            pass
+
+# Embedding model configurations
+EMBEDDING_MODELS = {
+    "sentence-transformers/all-MiniLM-L6-v2": {
+        "name": "MiniLM-L6-v2 (Fast)",
+        "dimension": 384,
+        "description": "Lightweight and fast, good for general purpose",
+        "trust_remote_code": False
+    },
+    "nomic-ai/nomic-embed-text-v1": {
+        "name": "Nomic Embed v1 (High Quality)",
+        "dimension": 768,
+        "description": "High quality embeddings, better semantic understanding",
+        "trust_remote_code": True
+    }
+}
 
 # Reranking and advanced retrieval
 try:
@@ -84,8 +106,12 @@ class SemanticChunker:
     """Advanced semantic chunking using sentence embeddings and coherence scoring"""
     
     def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
+        self.model_name = model_name
+        model_config = EMBEDDING_MODELS.get(model_name, {"trust_remote_code": False})
+        trust_remote_code = model_config.get("trust_remote_code", False)
+        
         try:
-            self.model = SentenceTransformer(model_name)
+            self.model = SentenceTransformer(model_name, trust_remote_code=trust_remote_code)
         except Exception as e:
             logging.error(f"Failed to load model {model_name}: {e}")
             # Try local cache paths
@@ -101,7 +127,7 @@ class SemanticChunker:
                     try:
                         os.environ['TRANSFORMERS_CACHE'] = cache_path
                         os.environ['HF_HOME'] = cache_path
-                        self.model = SentenceTransformer(model_name)
+                        self.model = SentenceTransformer(model_name, trust_remote_code=trust_remote_code)
                         break
                     except Exception:
                         continue
@@ -116,7 +142,9 @@ class SemanticChunker:
         # Split into sentences
         sentences = sent_tokenize(text)
         if len(sentences) < 2:
-            return [SemanticChunk(content=text, metadata=metadata)]
+            # Single sentence - still need embedding
+            embedding = self.model.encode([text])[0]
+            return [SemanticChunk(content=text, metadata=metadata, embedding=embedding)]
         
         # Get sentence embeddings
         sentence_embeddings = self.model.encode(sentences)
@@ -179,6 +207,18 @@ class HNSWVectorStore:
         self.index.set_ef(200)  # Set ef for search
         self.chunks: Dict[int, SemanticChunk] = {}
         self.next_id = 0
+        self.is_initialized = True
+    
+    def reinitialize(self, dimension: int):
+        """Reinitialize the vector store with new dimensions"""
+        if dimension != self.dimension:
+            self.dimension = dimension
+            self.index = hnswlib.Index(space='cosine', dim=dimension)
+            self.index.init_index(max_elements=self.max_elements, ef_construction=400, M=32)
+            self.index.set_ef(200)
+            self.chunks = {}
+            self.next_id = 0
+            self.is_initialized = True
         
     def add_chunks(self, chunks: List[SemanticChunk]):
         """Add chunks to the vector store"""
@@ -407,19 +447,23 @@ class HybridRetriever:
             }
         
         # Add BM25 scores
-        for i, score in enumerate(bm25_scores):
-            if i in combined_results:
-                combined_results[i]['bm25_score'] = score
-            elif score > 0:  # Only add if there's a meaningful BM25 score
-                # Find corresponding chunk
-                chunk = self.vector_store.chunks.get(i)
-                if chunk:
-                    combined_results[i] = {
-                        'chunk': chunk,
-                        'vector_score': 0,
-                        'bm25_score': score,
-                        'tfidf_score': 0
-                    }
+        if len(bm25_scores) > 0:
+            for i, score in enumerate(bm25_scores):
+                # Convert score to scalar if it's an array
+                score_val = float(score) if hasattr(score, '__len__') and len(score) == 1 else float(score)
+                
+                if i in combined_results:
+                    combined_results[i]['bm25_score'] = score_val
+                elif score_val > 0:  # Only add if there's a meaningful BM25 score
+                    # Find corresponding chunk
+                    chunk = self.vector_store.chunks.get(i)
+                    if chunk:
+                        combined_results[i] = {
+                            'chunk': chunk,
+                            'vector_score': 0,
+                            'bm25_score': score_val,
+                            'tfidf_score': 0
+                        }
         
         # Add TF-IDF scores
         for i, score in enumerate(tfidf_similarities):
@@ -431,11 +475,19 @@ class HybridRetriever:
         for result in combined_results.values():
             # Normalize scores
             vector_score = result['vector_score']
-            bm25_score = result['bm25_score'] / max(bm25_scores + [1]) if bm25_scores else 0
+            
+            # Safe BM25 normalization - handle numpy arrays properly
+            if len(bm25_scores) > 0:
+                max_bm25 = float(np.max(bm25_scores)) if hasattr(np.max(bm25_scores), '__len__') else float(max(bm25_scores))
+                max_bm25 = max(max_bm25, 1.0)  # Avoid division by zero
+                bm25_score = result['bm25_score'] / max_bm25
+            else:
+                bm25_score = 0
+                
             tfidf_score = result['tfidf_score']
             
             # Weighted combination
-            hybrid_score = (alpha * vector_score + 
+            hybrid_score = float(alpha * vector_score + 
                            (1 - alpha) * 0.5 * (bm25_score + tfidf_score))
             
             final_results.append((result['chunk'], hybrid_score))
@@ -481,7 +533,7 @@ class Reranker:
 class AutocutGenerator:
     """Autocut technique for dynamic context selection"""
     
-    def __init__(self, relevance_threshold: float = 0.3):
+    def __init__(self, relevance_threshold: float = 0.1):
         self.relevance_threshold = relevance_threshold
     
     def autocut_context(self, chunks_with_scores: List[Tuple[SemanticChunk, float]], 
@@ -517,8 +569,24 @@ class AdvancedRAGSystem:
     """Main RAG system orchestrating all components"""
     
     def __init__(self, embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"):
+        self.current_model_name = embedding_model
+        self._initialize_model(embedding_model)
+        
+        # Storage for different document types
+        self.indexed_documents = {
+            'financial_statements': [],
+            'news': [],
+            'stock_data': [],
+            'company_info': []
+        }
+    
+    def _initialize_model(self, embedding_model: str):
+        """Initialize or reinitialize the embedding model and components"""
+        model_config = EMBEDDING_MODELS.get(embedding_model, {"trust_remote_code": False})
+        trust_remote_code = model_config.get("trust_remote_code", False)
+        
         try:
-            self.embedding_model = SentenceTransformer(embedding_model)
+            self.embedding_model = SentenceTransformer(embedding_model, trust_remote_code=trust_remote_code)
         except Exception as e:
             logging.error(f"Failed to load embedding model {embedding_model}: {e}")
             # Try local cache paths
@@ -534,26 +602,54 @@ class AdvancedRAGSystem:
                     try:
                         os.environ['TRANSFORMERS_CACHE'] = cache_path
                         os.environ['HF_HOME'] = cache_path
-                        self.embedding_model = SentenceTransformer(embedding_model)
+                        self.embedding_model = SentenceTransformer(embedding_model, trust_remote_code=trust_remote_code)
                         break
                     except Exception:
                         continue
             else:
                 raise RuntimeError(f"Cannot load embedding model: {e}")
+        
+        # Get model dimension
+        model_dimension = EMBEDDING_MODELS.get(embedding_model, {}).get('dimension', 384)
+        
+        # Initialize components
         self.chunker = SemanticChunker(embedding_model)
-        self.vector_store = HNSWVectorStore(dimension=384)  # MiniLM embedding dimension
+        self.vector_store = HNSWVectorStore(dimension=model_dimension)
         self.query_rewriter = QueryRewriter()
         self.retriever = HybridRetriever(self.vector_store, self.embedding_model)
         self.reranker = Reranker()
         self.autocut = AutocutGenerator()
+    
+    def change_embedding_model(self, new_model: str):
+        """Change the embedding model and reinitialize components"""
+        if new_model != self.current_model_name:
+            self.current_model_name = new_model
+            self._initialize_model(new_model)
+            
+            # Re-index all existing documents with the new model
+            self._reindex_all_documents()
+            
+            return True
+        return False
+    
+    def _reindex_all_documents(self):
+        """Re-index all stored documents with the new embedding model"""
+        all_chunks = []
         
-        # Storage for different document types
-        self.indexed_documents = {
-            'financial_statements': [],
-            'news': [],
-            'stock_data': [],
-            'company_info': []
-        }
+        # Collect all chunks from indexed documents
+        for doc_type, chunks in self.indexed_documents.items():
+            for chunk in chunks:
+                # Re-embed with new model
+                chunk.embedding = self.embedding_model.encode([chunk.content])[0]
+                all_chunks.append(chunk)
+        
+        # Clear and rebuild vector store
+        model_dimension = EMBEDDING_MODELS.get(self.current_model_name, {}).get('dimension', 384)
+        self.vector_store.reinitialize(model_dimension)
+        
+        if all_chunks:
+            self.vector_store.add_chunks(all_chunks)
+            self.retriever.index_for_keyword_search(all_chunks)
     
     def index_financial_data(self, financial_data: Dict[str, Any], 
                            company_symbol: str, data_type: str):
@@ -639,7 +735,12 @@ class AdvancedRAGSystem:
                     for period in df.columns:
                         value = df.loc[metric, period]
                         if pd.notna(value):
-                            values_text.append(f"{period.strftime('%Y-%m-%d')}: ${value:,.0f}")
+                            # Handle both datetime and string periods
+                            if hasattr(period, 'strftime'):
+                                period_str = period.strftime('%Y-%m-%d')
+                            else:
+                                period_str = str(period)
+                            values_text.append(f"{period_str}: ${value:,.0f}")
                     
                     if values_text:
                         content = f"{statement_type.replace('_', ' ').title()} - {metric}: " + "; ".join(values_text)
@@ -818,6 +919,300 @@ class AdvancedRAGSystem:
                 'stock_data': [],
                 'company_info': []
             }
+
+class MultiModelRAGSystem:
+    """Advanced RAG system that maintains multiple embedding models simultaneously"""
+    
+    def __init__(self):
+        self.models = {}
+        self.active_model_key = "sentence-transformers/all-MiniLM-L6-v2"
+        self.ensemble_weights = {}
+        
+        # Initialize all available models
+        for model_key, model_info in EMBEDDING_MODELS.items():
+            self._initialize_model(model_key)
+            
+    def _initialize_model(self, model_key: str):
+        """Initialize a specific embedding model"""
+        try:
+            logging.info(f"Initializing model: {EMBEDDING_MODELS[model_key]['name']}")
+            rag_system = AdvancedRAGSystem(model_key)
+            
+            self.models[model_key] = {
+                'rag_system': rag_system,
+                'model_info': EMBEDDING_MODELS[model_key],
+                'is_indexed': False,
+                'last_updated': None,
+                'indexed_data_hash': {},  # Track what data has been indexed
+                'performance_metrics': {
+                    'total_queries': 0,
+                    'avg_retrieval_time': 0.0,
+                    'avg_relevance_score': 0.0
+                }
+            }
+            
+            # Set default ensemble weight
+            self.ensemble_weights[model_key] = 1.0
+            
+            logging.info(f"✅ Model {EMBEDDING_MODELS[model_key]['name']} initialized successfully")
+            
+        except Exception as e:
+            logging.error(f"❌ Failed to initialize model {model_key}: {e}")
+            self.models[model_key] = {
+                'rag_system': None,
+                'model_info': EMBEDDING_MODELS[model_key],
+                'is_indexed': False,
+                'error': str(e)
+            }
+    
+    def get_available_models(self) -> List[str]:
+        """Get list of successfully initialized model keys"""
+        return [key for key, info in self.models.items() 
+                if info.get('rag_system') is not None]
+    
+    def set_active_model(self, model_key: str):
+        """Set the active model for single-model operations"""
+        if model_key in self.get_available_models():
+            self.active_model_key = model_key
+            return True
+        return False
+    
+    def get_active_model(self) -> str:
+        """Get the current active model key"""
+        return self.active_model_key
+    
+    def index_financial_data(self, financial_data: Dict[str, Any], 
+                           company_symbol: str, data_type: str) -> Dict[str, int]:
+        """Index financial data in all available models simultaneously"""
+        results = {}
+        data_hash = hash(str(financial_data))
+        
+        for model_key in self.get_available_models():
+            model_info = self.models[model_key]
+            
+            # Check if this data has already been indexed for this model
+            if model_info['indexed_data_hash'].get(f"{company_symbol}_{data_type}") == data_hash:
+                results[model_key] = 0  # Already indexed
+                continue
+                
+            try:
+                rag_system = model_info['rag_system']
+                chunks_count = rag_system.index_financial_data(financial_data, company_symbol, data_type)
+                
+                # Update tracking info
+                model_info['is_indexed'] = True
+                model_info['last_updated'] = datetime.now()
+                model_info['indexed_data_hash'][f"{company_symbol}_{data_type}"] = data_hash
+                
+                results[model_key] = chunks_count
+                
+                logging.info(f"Indexed {chunks_count} chunks in {model_info['model_info']['name']}")
+                
+            except Exception as e:
+                logging.error(f"Error indexing in model {model_key}: {e}")
+                results[model_key] = -1
+                
+        return results
+    
+    def query_single_model(self, question: str, model_key: str = None, k: int = 5) -> Dict[str, Any]:
+        """Query a specific model"""
+        if model_key is None:
+            model_key = self.active_model_key
+            
+        if model_key not in self.get_available_models():
+            return {"error": f"Model {model_key} not available"}
+            
+        model_info = self.models[model_key]
+        rag_system = model_info['rag_system']
+        
+        import time
+        start_time = time.time()
+        
+        try:
+            result = rag_system.query(question, k=k, use_autocut=True)
+            
+            # Update performance metrics
+            retrieval_time = time.time() - start_time
+            model_info['performance_metrics']['total_queries'] += 1
+            
+            # Update running average of retrieval time
+            prev_avg = model_info['performance_metrics']['avg_retrieval_time']
+            total_queries = model_info['performance_metrics']['total_queries']
+            model_info['performance_metrics']['avg_retrieval_time'] = (
+                (prev_avg * (total_queries - 1) + retrieval_time) / total_queries
+            )
+            
+            # Add metadata
+            result['model_used'] = model_key
+            result['model_name'] = model_info['model_info']['name']
+            result['retrieval_time'] = retrieval_time
+            result['rag_enhanced'] = True
+            
+            return result
+            
+        except Exception as e:
+            return {
+                "error": str(e),
+                "model_used": model_key,
+                "rag_enhanced": False
+            }
+    
+    def query_ensemble(self, question: str, k: int = 5, 
+                      combination_method: str = "weighted_score") -> Dict[str, Any]:
+        """Query all models and combine results using ensemble method"""
+        available_models = self.get_available_models()
+        
+        if len(available_models) < 2:
+            # Fall back to single model if only one available
+            return self.query_single_model(question, k=k)
+        
+        model_results = {}
+        all_chunks = []
+        
+        # Query each model
+        for model_key in available_models:
+            result = self.query_single_model(question, model_key, k=k*2)  # Get more for ensemble
+            if not result.get('error'):
+                model_results[model_key] = result
+                
+                # Collect chunks with model attribution
+                for i, chunk in enumerate(result.get('chunks', [])):
+                    score = result.get('retrieval_scores', [0])[i] if i < len(result.get('retrieval_scores', [])) else 0
+                    weight = self.ensemble_weights.get(model_key, 1.0)
+                    
+                    all_chunks.append({
+                        'chunk': chunk,
+                        'model_key': model_key,
+                        'model_name': self.models[model_key]['model_info']['name'],
+                        'original_score': score,
+                        'weighted_score': score * weight,
+                        'model_weight': weight
+                    })
+        
+        if not all_chunks:
+            return {"error": "No results from any model", "rag_enhanced": False}
+        
+        # Combine results based on method
+        if combination_method == "weighted_score":
+            # Sort by weighted score
+            all_chunks.sort(key=lambda x: x['weighted_score'], reverse=True)
+        elif combination_method == "round_robin":
+            # Interleave results from different models
+            all_chunks = self._round_robin_combine(all_chunks, available_models)
+        
+        # Select top k unique chunks
+        final_chunks = []
+        seen_content = set()
+        
+        for chunk_info in all_chunks[:k*3]:  # Check more for uniqueness
+            content = chunk_info['chunk'].content
+            if content not in seen_content and len(final_chunks) < k:
+                seen_content.add(content)
+                final_chunks.append(chunk_info)
+        
+        # Create combined context
+        context_parts = []
+        retrieval_scores = []
+        model_contributions = {}
+        
+        for chunk_info in final_chunks:
+            context_parts.append(chunk_info['chunk'].content)
+            retrieval_scores.append(chunk_info['weighted_score'])
+            
+            model_name = chunk_info['model_name']
+            if model_name not in model_contributions:
+                model_contributions[model_name] = 0
+            model_contributions[model_name] += 1
+        
+        return {
+            'context': '\n\n'.join(context_parts),
+            'chunks': [info['chunk'] for info in final_chunks],
+            'num_chunks_retrieved': len(final_chunks),
+            'retrieval_scores': retrieval_scores,
+            'model_contributions': model_contributions,
+            'ensemble_method': combination_method,
+            'models_used': list(model_results.keys()),
+            'rag_enhanced': True,
+            'is_ensemble': True
+        }
+    
+    def _round_robin_combine(self, all_chunks: List[Dict], available_models: List[str]) -> List[Dict]:
+        """Combine chunks using round-robin from each model"""
+        model_chunks = {model: [] for model in available_models}
+        
+        # Group chunks by model
+        for chunk_info in all_chunks:
+            model_chunks[chunk_info['model_key']].append(chunk_info)
+        
+        # Round-robin selection
+        combined = []
+        max_per_model = max(len(chunks) for chunks in model_chunks.values())
+        
+        for i in range(max_per_model):
+            for model_key in available_models:
+                if i < len(model_chunks[model_key]):
+                    combined.append(model_chunks[model_key][i])
+        
+        return combined
+    
+    def get_model_stats(self) -> Dict[str, Any]:
+        """Get statistics for all models"""
+        stats = {
+            'active_model': self.active_model_key,
+            'available_models': self.get_available_models(),
+            'model_details': {}
+        }
+        
+        for model_key, model_info in self.models.items():
+            if model_info.get('rag_system'):
+                rag_system = model_info['rag_system']
+                stats['model_details'][model_key] = {
+                    'name': model_info['model_info']['name'],
+                    'dimension': model_info['model_info']['dimension'],
+                    'total_chunks': len(rag_system.vector_store.chunks),
+                    'is_indexed': model_info['is_indexed'],
+                    'last_updated': model_info['last_updated'],
+                    'performance_metrics': model_info['performance_metrics'],
+                    'indexed_documents': {
+                        doc_type: len(chunks) 
+                        for doc_type, chunks in rag_system.indexed_documents.items()
+                    }
+                }
+            else:
+                stats['model_details'][model_key] = {
+                    'name': model_info['model_info']['name'],
+                    'error': model_info.get('error', 'Unknown error'),
+                    'available': False
+                }
+        
+        return stats
+    
+    def set_ensemble_weights(self, weights: Dict[str, float]):
+        """Set ensemble weights for different models"""
+        for model_key, weight in weights.items():
+            if model_key in self.models:
+                self.ensemble_weights[model_key] = weight
+    
+    def clear_model_cache(self, model_key: str = None):
+        """Clear cache for specific model or all models"""
+        if model_key:
+            if model_key in self.models and self.models[model_key].get('rag_system'):
+                rag_system = self.models[model_key]['rag_system']
+                rag_system.vector_store = HNSWVectorStore(
+                    dimension=EMBEDDING_MODELS[model_key]['dimension']
+                )
+                rag_system.indexed_documents = {
+                    'financial_statements': [],
+                    'news': [],
+                    'stock_data': [],
+                    'company_info': []
+                }
+                self.models[model_key]['is_indexed'] = False
+                self.models[model_key]['indexed_data_hash'] = {}
+        else:
+            # Clear all models
+            for model_key in self.get_available_models():
+                self.clear_model_cache(model_key)
 
 # Example usage and testing
 if __name__ == "__main__":

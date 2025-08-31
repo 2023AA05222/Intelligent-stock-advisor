@@ -117,9 +117,8 @@ gcloud run deploy ${SERVICE_NAME} \
     --cpu 2 \
     --max-instances 10 \
     --min-instances 0 \
-    --set-env-vars="STREAMLIT_SERVER_HEADLESS=true" \
-    --set-secrets="GOOGLE_AI_API_KEY=google-ai-api-key:latest" \
-    --update-secrets="NEO4J_URI=neo4j-uri:latest,NEO4J_USERNAME=neo4j-username:latest,NEO4J_PASSWORD=neo4j-password:latest" \
+    --set-env-vars="STREAMLIT_SERVER_HEADLESS=true,STREAMLIT_BROWSER_GATHER_USAGE_STATS=false,TOKENIZERS_PARALLELISM=false,NEO4J_URI=neo4j+s://98b288d4.databases.neo4j.io,NEO4J_USERNAME=neo4j" \
+    --set-secrets="GOOGLE_AI_API_KEY=google-ai-api-key:latest,NEO4J_PASSWORD=neo4j-password:latest" \
     --project=${PROJECT_ID}
 
 # Get the service URL

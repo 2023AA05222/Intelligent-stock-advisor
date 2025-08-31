@@ -175,28 +175,22 @@ gcloud run logs read financial-analyst \
 
 ## Neo4j Database Deployment
 
-### Option 1: Neo4j AuraDB (Recommended for Production)
+### Option 1: Neo4j AuraDB (Currently Configured)
 
-1. **Create Neo4j AuraDB Instance**
-   - Go to [Neo4j Aura](https://console.neo4j.io/)
-   - Create a new Professional instance
-   - Note the connection URI and credentials
+✅ **Neo4j AuraDB Free Instance is already configured**:
+- **URI**: `neo4j+s://98b288d4.databases.neo4j.io`
+- **Username**: `neo4j`
+- **Password**: Stored securely in Google Secret Manager as `neo4j-password`
+- **Configuration**: Automatically deployed via `cloudbuild.yaml`
 
-2. **Update Cloud Run Environment Variables**
+The Cloud Run deployment is now configured to use your Neo4j Aura instance. All graph database features will be enabled on the next deployment.
+
+**Manual Update (if needed)**:
    ```bash
-   # Add Neo4j configuration
+   # Update Neo4j configuration
    gcloud run services update financial-analyst \
-     --set-env-vars="NEO4J_URI=neo4j+s://your-instance.databases.neo4j.io" \
+     --set-env-vars="NEO4J_URI=neo4j+s://98b288d4.databases.neo4j.io" \
      --set-env-vars="NEO4J_USERNAME=neo4j" \
-     --region=us-central1 \
-     --project=electric-vision-463705-f6
-   
-   # Add password as secret
-   echo "your-neo4j-password" | gcloud secrets create neo4j-password \
-     --data-file=- --project=electric-vision-463705-f6
-   
-   # Update service to use secret
-   gcloud run services update financial-analyst \
      --set-secrets="NEO4J_PASSWORD=neo4j-password:latest" \
      --region=us-central1 \
      --project=electric-vision-463705-f6

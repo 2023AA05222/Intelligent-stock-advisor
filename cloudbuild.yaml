@@ -1,14 +1,21 @@
 # Cloud Build configuration for automated deployment
 steps:
-  # Build the container image
+  # Build the container image with timestamp tag
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'gcr.io/$PROJECT_ID/financial-analyst:$COMMIT_SHA', '.']
+    args: ['build', '-t', 'gcr.io/$PROJECT_ID/financial-analyst:$BUILD_ID', '.']
   
-  # Push the container image to Container Registry
+  # Also tag as latest
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'gcr.io/$PROJECT_ID/financial-analyst:$COMMIT_SHA']
+    args: ['tag', 'gcr.io/$PROJECT_ID/financial-analyst:$BUILD_ID', 'gcr.io/$PROJECT_ID/financial-analyst:latest']
   
-  # Deploy container image to Cloud Run
+  # Push both tags to Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/financial-analyst:$BUILD_ID']
+  
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/financial-analyst:latest']
+  
+  # Deploy container image to Cloud Run (use latest for consistency)
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
@@ -16,7 +23,7 @@ steps:
       - 'deploy'
       - 'financial-analyst'
       - '--image'
-      - 'gcr.io/$PROJECT_ID/financial-analyst:$COMMIT_SHA'
+      - 'gcr.io/$PROJECT_ID/financial-analyst:latest'
       - '--region'
       - 'us-central1'
       - '--platform'
@@ -33,20 +40,13 @@ steps:
       - '--min-instances'
       - '0'
       - '--set-env-vars'
-      - 'STREAMLIT_SERVER_HEADLESS=true,STREAMLIT_BROWSER_GATHER_USAGE_STATS=false,TOKENIZERS_PARALLELISM=false'
+      - 'STREAMLIT_SERVER_HEADLESS=true,STREAMLIT_BROWSER_GATHER_USAGE_STATS=false,TOKENIZERS_PARALLELISM=false,NEO4J_URI=neo4j+s://98b288d4.databases.neo4j.io,NEO4J_USERNAME=neo4j'
       - '--set-secrets'
-      - 'GOOGLE_AI_API_KEY=google-ai-api-key:latest'
-
-# Also tag as latest
-  - name: 'gcr.io/cloud-builders/docker'
-    args: ['tag', 'gcr.io/$PROJECT_ID/financial-analyst:$COMMIT_SHA', 'gcr.io/$PROJECT_ID/financial-analyst:latest']
-  
-  - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'gcr.io/$PROJECT_ID/financial-analyst:latest']
+      - 'GOOGLE_AI_API_KEY=google-ai-api-key:latest,NEO4J_PASSWORD=neo4j-password:latest,OPENAI_API_KEY=openai-api-key:latest'
 
 # Optional: Keep some images for rollback
 images:
-  - 'gcr.io/$PROJECT_ID/financial-analyst:$COMMIT_SHA'
+  - 'gcr.io/$PROJECT_ID/financial-analyst:$BUILD_ID'
   - 'gcr.io/$PROJECT_ID/financial-analyst:latest'
 
 # Cloud Build configuration
